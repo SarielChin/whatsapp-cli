@@ -81,6 +81,11 @@ func (a *App) Close() {
 	}
 }
 
+// IsAuthenticated reports whether a WhatsApp session is already stored.
+func (a *App) IsAuthenticated() bool {
+	return a.client.IsAuthenticated()
+}
+
 func (a *App) Auth(ctx context.Context) string {
 	if a.client.IsAuthenticated() {
 		return output.Success(map[string]interface{}{
@@ -99,10 +104,22 @@ func (a *App) Auth(ctx context.Context) string {
 	})
 }
 
-func (a *App) ListMessages(chatJID *string, query *string, limit, page int) string {
+// ListMessages lists messages, newest first. since, when set, keeps only
+// messages at or after that time; see ParseSince for accepted formats.
+func (a *App) ListMessages(chatJID *string, query *string, since *string, limit, page int) string {
+	var sinceTime *time.Time
+	if since != nil {
+		t, err := ParseSince(*since)
+		if err != nil {
+			return output.Error(err)
+		}
+		sinceTime = &t
+	}
+
 	messages, err := a.store.ListMessages(store.ListMessagesParams{
 		ChatJID: chatJID,
 		Query:   query,
+		Since:   sinceTime,
 		Limit:   limit,
 		Page:    page,
 	})
@@ -111,6 +128,20 @@ func (a *App) ListMessages(chatJID *string, query *string, limit, page int) stri
 	}
 
 	return output.Success(messages)
+}
+
+// ParseSince parses a --since value: an RFC 3339 timestamp such as
+// 2026-10-30T15:04:05Z or 2026-10-30T11:04:05-04:00, or a date such as
+// 2026-10-30, which means midnight local time.
+func ParseSince(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("invalid since %q: use RFC 3339 (2026-10-30T15:04:05Z) or a date (2026-10-30)", s)
 }
 
 func (a *App) SearchContacts(query string) string {

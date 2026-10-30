@@ -376,6 +376,7 @@ whatsapp-cli messages list [OPTIONS]
 | Flag | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `--chat` | string | No | - | Filter by chat JID (e.g., `1234567890@s.whatsapp.net`) |
+| `--since` | string | No | - | Only messages at or after this time (inclusive). RFC 3339 (`2026-10-30T15:04:05Z`, `2026-10-30T11:04:05-04:00`) or a date (`2026-10-30`, local midnight) |
 | `--limit` | int | No | 20 | Maximum number of messages to return |
 | `--page` | int | No | 0 | Page number for pagination (0-indexed) |
 
@@ -410,6 +411,9 @@ whatsapp-cli messages list --chat 1234567890@s.whatsapp.net
 # Pagination: Get second page of results
 whatsapp-cli messages list --limit 20 --page 1
 
+# Only messages since a point in time (for polling)
+whatsapp-cli messages list --since 2026-10-30T15:00:00Z
+
 # Get JID first, then list messages
 JID=$(whatsapp-cli contacts search --query "Alice" | jq -r '.data[0].jid')
 whatsapp-cli messages list --chat "$JID" --limit 100
@@ -433,6 +437,8 @@ whatsapp-cli messages search --query TEXT [OPTIONS]
 | Flag | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `--query` | string | Yes | - | Search term (case-insensitive, partial match) |
+| `--chat` | string | No | - | Only search this chat JID |
+| `--since` | string | No | - | Only messages at or after this time (same formats as `messages list`) |
 | `--limit` | int | No | 20 | Maximum number of results |
 | `--page` | int | No | 0 | Page number for pagination |
 
@@ -454,7 +460,7 @@ whatsapp-cli messages search --query "URGENT"  # Finds "urgent", "Urgent", etc.
 - Case-insensitive
 - Partial word matching
 - Searches message content only (not sender names)
-- Returns messages from all chats
+- Returns messages from all chats unless you pass `--chat`
 
 ---
 
@@ -696,6 +702,62 @@ whatsapp-cli media download --message-id XYZ987 --chat 1234567890@s.whatsapp.net
 
 ---
 
+### Command: `mcp`
+
+Run a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio, so MCP clients such as Claude Code or Claude Desktop can read and send WhatsApp messages.
+
+**Syntax:**
+```bash
+whatsapp-cli mcp
+```
+
+**Parameters:** None (the global `--store` flag still applies)
+
+**Tools:**
+
+| Tool | Same as | Read-only |
+|------|---------|-----------|
+| `list_chats` | `chats list` | Yes |
+| `search_contacts` | `contacts search` | Yes |
+| `list_messages` | `messages list` | Yes |
+| `search_messages` | `messages search` (can also filter by `chat`) | Yes |
+| `send_message` | `send --message` | No — sends a real message |
+| `send_image` | `send --image` | No — sends a real message |
+| `download_media` | `media download` | No — writes a file |
+
+Each tool returns the same JSON as the matching CLI command. A response with `"success": false` comes back as a tool error.
+
+**Behavior:**
+- Requires an existing session. Run `whatsapp-cli auth` first, because the QR code can't be shown through an MCP client.
+- Syncs in the background, like `sync`, so the tools see new messages while the server runs.
+- Sends reuse the same WhatsApp connection as the background sync.
+- Writes only MCP protocol messages to stdout. Logs and sync progress go to stderr.
+- Stops when the client disconnects or on Ctrl+C.
+
+**Setup with Claude Code:**
+```bash
+claude mcp add whatsapp -- whatsapp-cli --store /path/to/store mcp
+```
+
+**Setup with Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "whatsapp-cli",
+      "args": ["--store", "/path/to/store", "mcp"]
+    }
+  }
+}
+```
+
+**Notes:**
+- Pass an absolute `--store` path. MCP clients start the server from their own working directory, so the default `./store` usually points somewhere else.
+- MCP clients don't get notified of new messages. To check for them, poll `list_messages` with `since` set to the timestamp of the newest message already seen, for example from a scheduled task. `since` is inclusive, so skip message IDs you have already seen.
+- Don't run `whatsapp-cli sync` at the same time. A WhatsApp linked device allows one connection at a time, so the two processes would keep disconnecting each other.
+
+---
+
 ## JSON Response Format
 
 All commands return JSON in this format:
@@ -909,43 +971,13 @@ if (contacts.success && contacts.data) {
 
 ### Claude Code / Codex Integration
 
-```typescript
-// Example Claude Code MCP tool wrapper
+Use the built-in MCP server instead of writing a wrapper:
 
-import { execSync } from 'child_process';
-
-export const whatsappTools = {
-  sendMessage: async (to: string, message: string) => {
-    const result = execSync(
-      `whatsapp-cli send --to "${to}" --message "${message}"`
-    ).toString();
-    return JSON.parse(result);
-  },
-
-  searchContacts: async (query: string) => {
-    const result = execSync(
-      `whatsapp-cli contacts search --query "${query}"`
-    ).toString();
-    return JSON.parse(result);
-  },
-
-  getRecentMessages: async (chatJid: string, limit = 20) => {
-    const result = execSync(
-      `whatsapp-cli messages list --chat "${chatJid}" --limit ${limit}`
-    ).toString();
-    return JSON.parse(result);
-  }
-};
-
-// Use in Claude Code
-const contacts = await whatsappTools.searchContacts("Alice");
-if (contacts.success) {
-  await whatsappTools.sendMessage(
-    contacts.data[0].jid,
-    "Automated message from Claude Code!"
-  );
-}
+```bash
+claude mcp add whatsapp -- whatsapp-cli --store /path/to/store mcp
 ```
+
+See [Command: `mcp`](#command-mcp) for the tool list and setup notes.
 
 ---
 
@@ -1517,6 +1549,8 @@ internal/
 │   └── client.go          # WhatsApp client wrapper
 ├── commands/
 │   └── commands.go        # CLI command implementations
+├── mcpserver/
+│   └── server.go          # MCP server exposing commands as tools
 ├── output/
 │   ├── output.go          # JSON formatting
 │   └── output_test.go     # Output tests
