@@ -115,6 +115,54 @@ func TestListMessages(t *testing.T) {
 	assert.Equal(t, "Hello", messages[1].Content)
 }
 
+// TestListMessages_SinceComparesInstantsAcrossZones guards the `since` filter
+// used for polling. go-sqlite3 stores times as text with a UTC offset, so a
+// plain string comparison would compare wall-clock times: a message at 10:00
+// EST (15:00 UTC) would sort before a 14:00 UTC cutoff and be dropped.
+func TestListMessages_SinceComparesInstantsAcrossZones(t *testing.T) {
+	store := setupTestDB(t)
+	chatJID := "1234@s.whatsapp.net"
+	est := time.FixedZone("EST", -5*3600)
+	edt := time.FixedZone("EDT", -4*3600)
+
+	store.StoreChat(chatJID, "John Doe", time.Now())
+	// 13:00 UTC, before the cutoff.
+	store.StoreMessage("old", chatJID, "1234", "old", time.Date(2026, 3, 8, 9, 0, 0, 0, edt), false, "", "", "", "", "", nil, nil, nil, 0)
+	// 14:00 UTC, exactly at the cutoff: included, so polling from the last
+	// seen timestamp never skips a message sent in the same second.
+	store.StoreMessage("edge", chatJID, "1234", "edge", time.Date(2026, 3, 8, 9, 0, 0, 0, est), false, "", "", "", "", "", nil, nil, nil, 0)
+	// 15:00 UTC, after the cutoff.
+	store.StoreMessage("new", chatJID, "1234", "new", time.Date(2026, 3, 8, 10, 0, 0, 0, est), false, "", "", "", "", "", nil, nil, nil, 0)
+
+	since := time.Date(2026, 3, 8, 14, 0, 0, 0, time.UTC)
+	messages, err := store.ListMessages(ListMessagesParams{Since: &since, Limit: 10})
+	require.NoError(t, err)
+
+	var ids []string
+	for _, m := range messages {
+		ids = append(ids, m.ID)
+	}
+	assert.Equal(t, []string{"new", "edge"}, ids)
+}
+
+// Sent messages are stored with time.Now(), which carries nanoseconds;
+// julianday() must still parse them, or `since` would drop every one.
+func TestListMessages_SinceHandlesFractionalSeconds(t *testing.T) {
+	store := setupTestDB(t)
+	chatJID := "1234@s.whatsapp.net"
+	now := time.Now()
+
+	store.StoreChat(chatJID, "John Doe", now)
+	store.StoreMessage("before", chatJID, "me", "before", now.Add(-time.Hour), true, "", "", "", "", "", nil, nil, nil, 0)
+	store.StoreMessage("after", chatJID, "me", "after", now, true, "", "", "", "", "", nil, nil, nil, 0)
+
+	since := now.Add(-time.Minute).UTC()
+	messages, err := store.ListMessages(ListMessagesParams{Since: &since, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "after", messages[0].ID)
+}
+
 func TestGetMessageForDownload(t *testing.T) {
 	store := setupTestDB(t)
 	chatJID := "1234@s.whatsapp.net"

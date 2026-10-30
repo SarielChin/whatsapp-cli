@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/vicentereig/whatsapp-cli/internal/commands"
+	"github.com/vicentereig/whatsapp-cli/internal/mcpserver"
+	"github.com/vicentereig/whatsapp-cli/internal/output"
 )
 
 var (
@@ -41,13 +43,14 @@ Usage:
 Commands:
   auth                              Authenticate with WhatsApp (scan QR code)
   sync                              Sync messages continuously (run until Ctrl+C)
-  messages list [--chat JID]        List messages
-  messages search --query TEXT      Search messages
+  messages list [--chat JID] [--since TIME]          List messages
+  messages search --query TEXT [--chat JID] [--since TIME]   Search messages
   contacts search --query TEXT      Search contacts
   chats list                        List chats
   send --to RECIPIENT --message TEXT                     Send a text message
   send --to RECIPIENT --image PATH [--caption TEXT]      Send an image
   media download --message-id ID [--chat JID] [--output PATH]   Download media for a message
+  mcp                               Run an MCP server on stdio (also syncs in the background)
   version                           Print CLI version information
 
 Global Options:
@@ -158,6 +161,15 @@ func main() {
 		exitJSON(err.Error())
 	}
 
+	// MCP speaks JSON-RPC on stdout, so nothing else may write there.
+	// whatsmeow's loggers print to os.Stdout, so point os.Stdout at stderr
+	// and hand the real stdout to the MCP transport only.
+	var mcpOut *os.File
+	if command == "mcp" {
+		mcpOut = os.Stdout
+		os.Stdout = os.Stderr
+	}
+
 	app, err := commands.NewApp(absStoreDir, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, `{"success":false,"data":null,"error":"Failed to initialize: %v"}
@@ -166,11 +178,11 @@ func main() {
 	}
 	defer app.Close()
 
-	// Use different timeout for sync command
+	// Use different timeout for long-running commands
 	var ctx context.Context
 	var cancel context.CancelFunc
-	if command == "sync" {
-		// For sync, use signal-based cancellation
+	if command == "sync" || command == "mcp" {
+		// For sync and mcp, use signal-based cancellation
 		ctx, cancel = context.WithCancel(context.Background())
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -197,6 +209,7 @@ func main() {
 		messagesCmd := flag.NewFlagSet("messages", flag.ExitOnError)
 		chatJID := messagesCmd.String("chat", "", "chat JID")
 		query := messagesCmd.String("query", "", "search query")
+		since := messagesCmd.String("since", "", "only messages at or after this time (RFC 3339 or YYYY-MM-DD)")
 		limit := messagesCmd.Int("limit", 20, "limit")
 		page := messagesCmd.Int("page", 0, "page")
 		// Parse from args[2:] to skip subcommand ("list"/"search") —
@@ -210,9 +223,9 @@ func main() {
 			if *query == "" {
 				exitJSON("messages search requires --query")
 			}
-			result = app.ListMessages(nil, query, *limit, *page)
+			result = app.ListMessages(optionalStr(*chatJID), query, optionalStr(*since), *limit, *page)
 		case "list":
-			result = app.ListMessages(optionalStr(*chatJID), nil, *limit, *page)
+			result = app.ListMessages(optionalStr(*chatJID), nil, optionalStr(*since), *limit, *page)
 		}
 
 	case "contacts":
@@ -278,6 +291,35 @@ func main() {
 			exitJSON("--message-id required")
 		}
 		result = app.DownloadMedia(ctx, *messageID, optionalStr(*chatJID), *outputPath)
+
+	case "mcp":
+		// The QR code can't be shown through an MCP client, so require an
+		// existing session instead of starting the auth flow.
+		if !app.IsAuthenticated() {
+			exitJSON("not authenticated: run 'whatsapp-cli auth' first")
+		}
+
+		// One process holds the only WhatsApp connection: sync runs in the
+		// background so the tools read fresh messages, and sends reuse the
+		// same connection instead of replacing it.
+		mcpCtx, stopMCP := context.WithCancel(ctx)
+		syncDone := make(chan struct{})
+		go func() {
+			defer close(syncDone)
+			fmt.Fprintln(os.Stderr, app.Sync(mcpCtx))
+		}()
+
+		err := mcpserver.Run(mcpCtx, app, version, os.Stdin, mcpOut)
+		stopMCP()
+		<-syncDone
+
+		// os.Stdout points at stderr here, so this summary stays off the
+		// MCP channel.
+		if err != nil {
+			result = output.Error(fmt.Errorf("mcp server stopped: %w", err))
+		} else {
+			result = output.Success(map[string]interface{}{"stopped": true})
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, `{"success":false,"data":null,"error":"Unknown command: %s"}

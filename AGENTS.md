@@ -43,7 +43,8 @@ pull request. There is no linter config and no Makefile in this repo.
 
 - Package layout: `internal/client` wraps `whatsmeow`. `internal/store`
   wraps SQLite. `internal/commands` holds the `App` type, with one method
-  per CLI command. `internal/output` formats the JSON output.
+  per CLI command. `internal/mcpserver` exposes those `App` methods as
+  MCP tools for the `mcp` command. `internal/output` formats the JSON output.
   `internal/types` holds types shared between `client` and `commands`, to
   avoid an import cycle.
 - Define interfaces at the consumer, not at the implementation.

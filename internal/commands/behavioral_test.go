@@ -62,7 +62,7 @@ func TestListMessages_FiltersByChat(t *testing.T) {
 	app := NewAppWithDeps(&MockWAClient{}, mockStore, "/tmp", "test")
 
 	// When: ListMessages called with chat filter
-	result := app.ListMessages(ptr(targetJID), nil, 10, 0)
+	result := app.ListMessages(ptr(targetJID), nil, nil, 10, 0)
 
 	// Then: Only messages from target chat are returned
 	resp := parseResponse(t, result)
@@ -102,7 +102,7 @@ func TestListMessages_RespectsLimit(t *testing.T) {
 	app := NewAppWithDeps(&MockWAClient{}, mockStore, "/tmp", "test")
 
 	// When: ListMessages called with limit=2
-	result := app.ListMessages(nil, nil, 2, 0)
+	result := app.ListMessages(nil, nil, nil, 2, 0)
 
 	// Then: Only 2 messages returned (behavioral - tests output, not internals)
 	resp := parseResponse(t, result)
@@ -112,6 +112,52 @@ func TestListMessages_RespectsLimit(t *testing.T) {
 	err := json.Unmarshal(resp.Data, &messages)
 	require.NoError(t, err)
 	require.Len(t, messages, 2, "should return only 2 messages")
+}
+
+// TestListMessages_SinceIsParsedForPolling verifies that --since reaches the
+// store as an instant, so MCP clients can poll for messages newer than the
+// last one they saw.
+func TestListMessages_SinceIsParsedForPolling(t *testing.T) {
+	var got *time.Time
+	mockStore := &MockMessageStore{
+		ListMessagesFunc: func(params store.ListMessagesParams) ([]store.Message, error) {
+			got = params.Since
+			return nil, nil
+		},
+	}
+	app := NewAppWithDeps(&MockWAClient{}, mockStore, "/tmp", "test")
+
+	result := app.ListMessages(nil, nil, ptr("2026-10-30T11:04:05-04:00"), 20, 0)
+
+	require.True(t, parseResponse(t, result).Success)
+	require.NotNil(t, got)
+	require.True(t, got.Equal(time.Date(2026, 10, 30, 15, 4, 5, 0, time.UTC)))
+}
+
+// TestListMessages_RejectsInvalidSince verifies that a malformed --since is
+// reported as an error instead of being ignored, which would silently return
+// old messages as if they were new.
+func TestListMessages_RejectsInvalidSince(t *testing.T) {
+	called := false
+	mockStore := &MockMessageStore{
+		ListMessagesFunc: func(params store.ListMessagesParams) ([]store.Message, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	app := NewAppWithDeps(&MockWAClient{}, mockStore, "/tmp", "test")
+
+	resp := parseResponse(t, app.ListMessages(nil, nil, ptr("yesterday"), 20, 0))
+
+	require.False(t, resp.Success)
+	require.Contains(t, *resp.Error, "invalid since")
+	require.False(t, called, "store must not be queried with an invalid since")
+}
+
+func TestParseSince_DateMeansLocalMidnight(t *testing.T) {
+	got, err := ParseSince("2026-10-30")
+	require.NoError(t, err)
+	require.True(t, got.Equal(time.Date(2026, 10, 30, 0, 0, 0, 0, time.Local)))
 }
 
 // TestDownloadMedia_Errors uses table-driven tests for error cases.

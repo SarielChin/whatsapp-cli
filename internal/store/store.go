@@ -115,8 +115,8 @@ type MessageDownloadInfo struct {
 }
 
 type ListMessagesParams struct {
-	After   *time.Time
-	Before  *time.Time
+	Since   *time.Time // inclusive: messages at or after this instant
+	Before  *time.Time // exclusive
 	Sender  *string
 	ChatJID *string
 	Query   *string
@@ -306,13 +306,15 @@ func (s *MessageStore) ListMessages(params ListMessagesParams) ([]Message, error
 	          FROM messages m JOIN chats c ON m.chat_jid = c.jid WHERE 1=1`
 	args := []interface{}{}
 
-	if params.After != nil {
-		query += " AND m.timestamp > ?"
-		args = append(args, params.After)
+	// Timestamps are stored as text with a UTC offset, so compare through
+	// julianday() to compare instants rather than wall-clock strings.
+	if params.Since != nil {
+		query += " AND julianday(m.timestamp) >= julianday(?)"
+		args = append(args, *params.Since)
 	}
 	if params.Before != nil {
-		query += " AND m.timestamp < ?"
-		args = append(args, params.Before)
+		query += " AND julianday(m.timestamp) < julianday(?)"
+		args = append(args, *params.Before)
 	}
 	if params.Sender != nil {
 		query += " AND m.sender = ?"

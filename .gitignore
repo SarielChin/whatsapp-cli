@@ -24,3 +24,7 @@ vendor/
 *.swp
 *.swo
 *~
+
+# Local agent notes (machine-specific)
+CLAUDE.local.md
+AGENTS.local.md
